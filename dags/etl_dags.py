@@ -9,7 +9,7 @@ import pandas as pd
 
 default_args = {
     "owner": "SirNicholas1st",
-    "retries": 1,
+    "retries": 2,
     "retry_delay": timedelta(minutes=2)
 }
 
@@ -38,6 +38,7 @@ def pipeline():
         df = df.rename(columns={"hourly.time": "date_time", "hourly.temperature_2m":"temperature", "hourly.relativehumidity_2m":"RH"})
         return df
     
+    # Checking if the DF is empty or contains Null values and raising an exception if either is true.
     @task
     def check_data(df):
 
@@ -45,29 +46,39 @@ def pipeline():
             raise Exception("Dataframe is empty")
         elif df.isna().sum().sum() > 0:
             raise Exception("Dataframe contains Null values")
-        
-    @task
+
+    # Pandas dataframe to Snowflake  
+    @task(trigger_rule = "all_success")
     def df_to_snowflake(df):
         
         snowflake_hook = SnowflakeHook(snowflake_conn_id = "snowflake_default")
         conn = snowflake_hook.get_uri()
         engine = create_engine(conn)
-        df.to_sql("WEATHER_TABLE", con = engine, index = False, if_exists = "replace")
+        df.to_sql("WEATHER_TABLE", con = engine, index = False, if_exists = "append")
 
-
-    task1 = get_weather_data()
-
-    task2 = check_data(task1)
-
-    task3 = df_to_snowflake(task1)
-
+    # Creates the table to snowflake, using the connection that has been defined in Airflow Web UI
     task0 = SnowflakeOperator(
         task_id = "create_table",
         sql = "sql/create_table.sql",
         snowflake_conn_id = "snowflake_default"
     )
 
+    task1 = get_weather_data()
 
-    task0 >> task1 >> task2 >> task3
+    task2 = check_data(task1)
+
+    # we wont keep the historical data, since we are only interested in the current forecast.
+    task3 = SnowflakeOperator(
+        task_id = "clear_table",
+        trigger_rule = "all_success",
+        sql = "DELETE FROM WEATHER_TABLE",
+        snowflake_conn_id = "snowflake_default"
+    )
+
+    task4 = df_to_snowflake(task1)
+
+
+
+    task0 >> task1 >> task2 >> task3 >> task4
 
 pipeline()
